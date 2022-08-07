@@ -22,26 +22,34 @@ import collections
 import collections.abc
 import functools
 import operator
-from typing import TYPE_CHECKING, Any, NamedTuple, Sequence, Union
+from typing import TYPE_CHECKING, Any, Iterable, Mapping, NamedTuple, Sequence, Sized, Union
 
-from sqlalchemy import func
-from sqlalchemy.orm import Session
-
-from airflow.exceptions import UnmappableXComTypePushed
+from airflow.compat.functools import cache
 from airflow.utils.context import Context
 
 if TYPE_CHECKING:
+    from sqlalchemy.orm import Session
+
     from airflow.models.xcom_arg import XComArg
+
+ExpandInput = Union["DictOfListsExpandInput", "ListOfDictsExpandInput"]
 
 # BaseOperator.expand() can be called on an XComArg, sequence, or dict (not any
 # mapping since we need the value to be ordered).
 Mappable = Union["XComArg", Sequence, dict]
 
-MAPPABLE_LITERAL_TYPES = (dict, list)
+
+# For isinstance() check.
+@cache
+def get_mappable_types() -> tuple[type, ...]:
+    from airflow.models.xcom_arg import XComArg
+
+    return (XComArg, list, tuple, dict)
 
 
 class NotFullyPopulated(RuntimeError):
     """Raise when ``get_map_lengths`` cannot populate all mapping metadata.
+
     This is generally due to not all upstream tasks have finished when the
     function is called.
     """
@@ -62,15 +70,20 @@ class DictOfListsExpandInput(NamedTuple):
 
     value: dict[str, Mappable]
 
-    @staticmethod
-    def validate_xcom(value: Any) -> None:
-        if not isinstance(value, collections.abc.Collection) or isinstance(value, (bytes, str)):
-            raise UnmappableXComTypePushed(value)
+    def get_unresolved_kwargs(self) -> dict[str, Any]:
+        """Get the kwargs dict that can be inferred without resolving."""
+        return self.value
+
+    def iter_parse_time_resolved_kwargs(self) -> Iterable[tuple[str, Sized]]:
+        """Generate kwargs with values available on parse-time."""
+        from airflow.models.xcom_arg import XComArg
+
+        return ((k, v) for k, v in self.value.items() if not isinstance(v, XComArg))
 
     def get_parse_time_mapped_ti_count(self) -> int | None:
         if not self.value:
             return 0
-        literal_values = [len(v) for v in self.value.values() if isinstance(v, MAPPABLE_LITERAL_TYPES)]
+        literal_values = [len(v) for _, v in self.iter_parse_time_resolved_kwargs()]
         if len(literal_values) != len(self.value):
             return None  # None-literal type encountered, so give up.
         return functools.reduce(operator.mul, literal_values, 1)
@@ -81,62 +94,16 @@ class DictOfListsExpandInput(NamedTuple):
         If any arguments are not known right now (upstream task not finished),
         they will not be present in the dict.
         """
-        from airflow.models.taskmap import TaskMap
-        from airflow.models.xcom import XCom
         from airflow.models.xcom_arg import XComArg
 
-        # Populate literal mapped arguments first.
-        map_lengths: dict[str, int] = collections.defaultdict(int)
-        map_lengths.update((k, len(v)) for k, v in self.value.items() if not isinstance(v, XComArg))
-
-        try:
-            dag_id = next(v.operator.dag_id for v in self.value.values() if isinstance(v, XComArg))
-        except StopIteration:  # All mapped arguments are literal. We're done.
-            return map_lengths
-
-        # Build a reverse mapping of what arguments each task contributes to.
-        mapped_dep_keys: dict[str, set[str]] = collections.defaultdict(set)
-        non_mapped_dep_keys: dict[str, set[str]] = collections.defaultdict(set)
-        for k, v in self.value.items():
-            if not isinstance(v, XComArg):
-                continue
-            assert v.operator.dag_id == dag_id
-            if v.operator.is_mapped:
-                mapped_dep_keys[v.operator.task_id].add(k)
-            else:
-                non_mapped_dep_keys[v.operator.task_id].add(k)
-            # TODO: It's not possible now, but in the future we may support
-            # depending on one single mapped task instance. When that happens,
-            # we need to further analyze the mapped case to contain only tasks
-            # we depend on "as a whole", and put those we only depend on
-            # individually to the non-mapped lookup.
-
-        # Collect lengths from unmapped upstreams.
-        taskmap_query = session.query(TaskMap.task_id, TaskMap.length).filter(
-            TaskMap.dag_id == dag_id,
-            TaskMap.run_id == run_id,
-            TaskMap.task_id.in_(non_mapped_dep_keys),
-            TaskMap.map_index < 0,
+        # TODO: This initiates one database call for each XComArg. Would it be
+        # more efficient to do one single db call and unpack the value here?
+        map_lengths_iterator = (
+            (k, (v.get_task_map_length(run_id, session=session) if isinstance(v, XComArg) else len(v)))
+            for k, v in self.value.items()
         )
-        for task_id, length in taskmap_query:
-            for mapped_arg_name in non_mapped_dep_keys[task_id]:
-                map_lengths[mapped_arg_name] += length
 
-        # Collect lengths from mapped upstreams.
-        xcom_query = (
-            session.query(XCom.task_id, func.count(XCom.map_index))
-            .group_by(XCom.task_id)
-            .filter(
-                XCom.dag_id == dag_id,
-                XCom.run_id == run_id,
-                XCom.task_id.in_(mapped_dep_keys),
-                XCom.map_index >= 0,
-            )
-        )
-        for task_id, length in xcom_query:
-            for mapped_arg_name in mapped_dep_keys[task_id]:
-                map_lengths[mapped_arg_name] += length
-
+        map_lengths = {k: v for k, v in map_lengths_iterator if v is not None}
         if len(map_lengths) < len(self.value):
             raise NotFullyPopulated(set(self.value).difference(map_lengths))
         return map_lengths
@@ -180,16 +147,68 @@ class DictOfListsExpandInput(NamedTuple):
                 return k, v
         raise IndexError(f"index {map_index} is over mapped length")
 
-    def resolve(self, context: Context, session: Session) -> dict[str, Any]:
+    def resolve(self, context: Context, session: Session) -> Mapping[str, Any]:
         return {k: self._expand_mapped_field(k, v, context, session=session) for k, v in self.value.items()}
 
 
-ExpandInput = DictOfListsExpandInput
+def _describe_type(value: Any) -> str:
+    if value is None:
+        return "None"
+    return type(value).__name__
+
+
+class ListOfDictsExpandInput(NamedTuple):
+    """Storage type of a mapped operator's mapped kwargs.
+
+    This is created from ``expand_kwargs(xcom_arg)``.
+    """
+
+    value: XComArg
+
+    def get_unresolved_kwargs(self) -> dict[str, Any]:
+        """Get the kwargs dict that can be inferred without resolving.
+
+        Since the list-of-dicts case relies entirely on run-time XCom, there's
+        no kwargs structure available, so this just returns an empty dict.
+        """
+        return {}
+
+    def iter_parse_time_resolved_kwargs(self) -> Iterable[tuple[str, Sized]]:
+        return ()
+
+    def get_parse_time_mapped_ti_count(self) -> int | None:
+        return None
+
+    def get_total_map_length(self, run_id: str, *, session: Session) -> int:
+        length = self.value.get_task_map_length(run_id, session=session)
+        if length is None:
+            raise NotFullyPopulated({"expand_kwargs() argument"})
+        return length
+
+    def resolve(self, context: Context, session: Session) -> Mapping[str, Any]:
+        map_index = context["ti"].map_index
+        if map_index < 0:
+            raise RuntimeError("can't resolve task-mapping argument without expanding")
+        mappings = self.value.resolve(context, session)
+        if not isinstance(mappings, collections.abc.Sequence):
+            raise ValueError(f"expand_kwargs() expects a list[dict], not {_describe_type(mappings)}")
+        mapping = mappings[map_index]
+        if not isinstance(mapping, collections.abc.Mapping):
+            raise ValueError(f"expand_kwargs() expects a list[dict], not list[{_describe_type(mapping)}]")
+        for key in mapping:
+            if not isinstance(key, str):
+                raise ValueError(
+                    f"expand_kwargs() input dict keys must all be str, "
+                    f"but {key!r} is of type {_describe_type(key)}"
+                )
+        return mapping
+
 
 EXPAND_INPUT_EMPTY = DictOfListsExpandInput({})  # Sentinel value.
 
 _EXPAND_INPUT_TYPES = {
     "dict-of-lists": DictOfListsExpandInput,
+    "list-of-dicts": ListOfDictsExpandInput,
 }
 
 

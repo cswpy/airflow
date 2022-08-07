@@ -29,6 +29,15 @@
             "default": "",
             "x-docsSection": null
         },
+        "revisionHistoryLimit": {
+            "description": "Global number of old replicasets to retain. Can be overridden by each deployment's revisionHistoryLimit",
+            "type": [
+                "integer",
+                "null"
+            ],
+            "default": null,
+            "x-docsSection": null
+        },
         "nameOverride": {
             "description": "Override the name of the chart",
             "type": "string",
@@ -68,13 +77,13 @@
         "defaultAirflowTag": {
             "description": "Default airflow tag to deploy.",
             "type": "string",
-            "default": "2.3.2",
+            "default": "2.3.3",
             "x-docsSection": "Common"
         },
         "airflowVersion": {
             "description": "Airflow version (Used to make some decisions based on Airflow Version being deployed).",
             "type": "string",
-            "default": "2.3.2",
+            "default": "2.3.3",
             "x-docsSection": "Common"
         },
         "securityContext": {
@@ -848,6 +857,14 @@
                         "description": "Type **as string** of secret E.G. Opaque, kubernetes.io/dockerconfigjson, etc.",
                         "type": "string"
                     },
+                    "labels": {
+                        "description": "Labels for the secret",
+                        "type": "object",
+                        "default": null,
+                        "additionalProperties": {
+                            "type": "string"
+                        }
+                    },
                     "data": {
                         "description": "Content **as string** for the 'data' item of the secret (can be templated)",
                         "type": "string"
@@ -878,8 +895,16 @@
                 "minProperties": 1,
                 "additionalProperties": false,
                 "properties": {
+                    "labels": {
+                        "description": "Labels for the configmap",
+                        "type": "object",
+                        "default": null,
+                        "additionalProperties": {
+                            "type": "string"
+                        }
+                    },
                     "data": {
-                        "description": "Content **as string** for the 'data' item of the secret (can be templated)",
+                        "description": "Content **as string** for the 'data' item of the configmap (can be templated)",
                         "type": "string"
                     }
                 }
@@ -1138,6 +1163,15 @@
                     "description": "Number of Airflow Celery workers in StatefulSet.",
                     "type": "integer",
                     "default": 1
+                },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
                 },
                 "command": {
                     "description": "Command to use when running Airflow workers (templated).",
@@ -1593,6 +1627,15 @@
                     "type": "integer",
                     "default": 1
                 },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
+                },
                 "command": {
                     "description": "Command to use when running the Airflow scheduler (templated).",
                     "type": [
@@ -1934,6 +1977,15 @@
                     "type": "integer",
                     "default": 1
                 },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
+                },
                 "command": {
                     "description": "Command to use when running the Airflow triggerer (templated).",
                     "type": [
@@ -2191,6 +2243,15 @@
                     "description": "Number of dag processors to run.",
                     "type": "integer",
                     "default": 1
+                },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
                 },
                 "command": {
                     "description": "Command to use when running the Airflow dag processor (templated).",
@@ -2831,6 +2892,15 @@
                     "type": "integer",
                     "default": 1
                 },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
+                },
                 "command": {
                     "description": "Command to use when running the Airflow webserver (templated).",
                     "type": [
@@ -3244,6 +3314,15 @@
                     "type": "boolean",
                     "default": false
                 },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
+                },
                 "command": {
                     "description": "Command to use when running flower (templated).",
                     "type": [
@@ -3565,6 +3644,15 @@
                     "type": "boolean",
                     "default": true
                 },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
+                },
                 "extraNetworkPolicies": {
                     "description": "Additional NetworkPolicies as needed.",
                     "type": "array",
@@ -3710,6 +3798,15 @@
                     "type": "boolean",
                     "x-docsSection": "Common",
                     "default": false
+                },
+                "revisionHistoryLimit": {
+                    "description": "Number of old replicasets to retain.",
+                    "type": [
+                        "integer",
+                        "null"
+                    ],
+                    "default": null,
+                    "x-docsSection": null
                 },
                 "command": {
                     "description": "Command to use for PgBouncer (templated).",

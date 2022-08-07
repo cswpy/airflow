@@ -1227,6 +1227,70 @@ def test_mapped_length_increase_at_runtime_adds_additional_tis(dag_maker, sessio
     ]
 
 
+def test_mapped_literal_length_reduction_at_runtime_adds_removed_state(dag_maker, session):
+    """
+    Test that when the length of mapped literal reduces at runtime, the missing task instances
+    are marked as removed
+    """
+    from airflow.models import Variable
+
+    Variable.set(key='arg1', value=[1, 2, 3])
+
+    @task
+    def task_1():
+        return Variable.get('arg1', deserialize_json=True)
+
+    with dag_maker(session=session) as dag:
+
+        @task
+        def task_2(arg2):
+            ...
+
+        task_2.expand(arg2=task_1())
+
+    dr = dag_maker.create_dagrun()
+    ti = dr.get_task_instance(task_id='task_1')
+    ti.run()
+    dr.task_instance_scheduling_decisions()
+    tis = dr.get_task_instances()
+    indices = [(ti.map_index, ti.state) for ti in tis if ti.map_index >= 0]
+    assert sorted(indices) == [
+        (0, State.NONE),
+        (1, State.NONE),
+        (2, State.NONE),
+    ]
+
+    # Now "clear" and "reduce" the length of literal
+    dag.clear()
+    Variable.set(key='arg1', value=[1, 2])
+
+    with dag:
+        task_2.expand(arg2=task_1()).operator
+
+    # At this point, we need to test that the change works on the serialized
+    # DAG (which is what the scheduler operates on)
+    serialized_dag = SerializedDAG.from_dict(SerializedDAG.to_dict(dag))
+
+    dr.dag = serialized_dag
+
+    # Run the first task again to get the new lengths
+    ti = dr.get_task_instance(task_id='task_1')
+    task1 = dag.get_task('task_1')
+    ti.refresh_from_task(task1)
+    ti.run()
+
+    # this would be called by the localtask job
+    dr.task_instance_scheduling_decisions()
+    tis = dr.get_task_instances()
+
+    indices = [(ti.map_index, ti.state) for ti in tis if ti.map_index >= 0]
+    assert sorted(indices) == [
+        (0, State.NONE),
+        (1, State.NONE),
+        (2, TaskInstanceState.REMOVED),
+    ]
+
+
 @pytest.mark.need_serialized_dag
 def test_mapped_mixed__literal_not_expanded_at_create(dag_maker, session):
     literal = [1, 2, 3, 4]
@@ -1422,3 +1486,24 @@ def test_schedule_tis_map_index(dag_maker, session):
     assert ti0.state == TaskInstanceState.SUCCESS
     assert ti1.state == TaskInstanceState.SCHEDULED
     assert ti2.state == TaskInstanceState.SUCCESS
+
+
+def test_mapped_expand_kwargs(dag_maker):
+    with dag_maker() as dag:
+
+        @task
+        def task_1():
+            return [{"arg1": "a", "arg2": "b"}, {"arg1": "y"}, {"arg2": "z"}]
+
+        MockOperator.partial(task_id="task_2").expand_kwargs(task_1())
+
+    dr: DagRun = dag_maker.create_dagrun()
+    assert len([ti for ti in dr.get_task_instances() if ti.task_id == "task_2"]) == 1
+
+    ti1 = dr.get_task_instance("task_1")
+    ti1.refresh_from_task(dag.get_task("task_1"))
+    ti1.run()
+
+    dr.task_instance_scheduling_decisions()
+    ti_states = {ti.map_index: ti.state for ti in dr.get_task_instances() if ti.task_id == "task_2"}
+    assert ti_states == {0: None, 1: None, 2: None}

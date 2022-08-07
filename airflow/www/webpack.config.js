@@ -55,7 +55,7 @@ Foundation (http://www.apache.org/).
 
 const config = {
   entry: {
-    airflowDefaultTheme: `${CSS_DIR}/bootstrap-theme.css`,
+    airflowBootstrapTheme: `${CSS_DIR}/airflow_bootstrap_theme.css`,
     connectionForm: `${JS_DIR}/connection_form.js`,
     chart: [`${CSS_DIR}/chart.css`],
     dag: `${JS_DIR}/dag.js`,
@@ -73,7 +73,8 @@ const config = {
     task: `${JS_DIR}/task.js`,
     taskInstances: `${JS_DIR}/task_instances.js`,
     tiLog: `${JS_DIR}/ti_log.js`,
-    grid: [`${JS_DIR}/grid/index.jsx`],
+    grid: `${JS_DIR}/dag/index.tsx`,
+    datasets: `${JS_DIR}/datasets/index.tsx`,
     calendar: [`${CSS_DIR}/calendar.css`, `${JS_DIR}/calendar.js`],
     durationChart: `${JS_DIR}/duration_chart.js`,
     trigger: `${JS_DIR}/trigger.js`,
@@ -89,8 +90,7 @@ const config = {
   },
   resolve: {
     alias: { // Be sure to update aliases in jest.config.js and tsconfig.json
-      app: path.resolve(__dirname, 'static/js'),
-      grid: path.resolve(__dirname, 'static/js/grid'),
+      src: path.resolve(__dirname, 'static/js'),
     },
     extensions: [
       '.js',

@@ -15,7 +15,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
-
+import collections
 import copy
 import functools
 import itertools
@@ -38,6 +38,7 @@ from typing import (
     Dict,
     FrozenSet,
     Iterable,
+    Iterator,
     List,
     NamedTuple,
     Optional,
@@ -49,12 +50,13 @@ from typing import (
     cast,
     overload,
 )
+from urllib.parse import urlsplit
 
 import jinja2
 import pendulum
 from dateutil.relativedelta import relativedelta
 from pendulum.tz.timezone import Timezone
-from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, String, Text, func, not_, or_
+from sqlalchemy import Boolean, Column, ForeignKey, Index, Integer, String, Text, and_, case, func, not_, or_
 from sqlalchemy.orm import backref, joinedload, relationship
 from sqlalchemy.orm.query import Query
 from sqlalchemy.orm.session import Session
@@ -66,11 +68,12 @@ from airflow.compat.functools import cached_property
 from airflow.configuration import conf
 from airflow.exceptions import AirflowDagInconsistent, AirflowException, DuplicateTaskIdFound, TaskNotFound
 from airflow.models.abstractoperator import AbstractOperator
-from airflow.models.base import ID_LEN, Base
+from airflow.models.base import Base, StringID
 from airflow.models.dagbag import DagBag
 from airflow.models.dagcode import DagCode
 from airflow.models.dagpickle import DagPickle
 from airflow.models.dagrun import DagRun
+from airflow.models.dataset import DatasetDagRef, DatasetDagRunQueue as DDRQ
 from airflow.models.operator import Operator
 from airflow.models.param import DagParam, ParamsDict
 from airflow.models.taskinstance import Context, TaskInstance, TaskInstanceKey, clear_task_instances
@@ -78,7 +81,7 @@ from airflow.security import permissions
 from airflow.stats import Stats
 from airflow.timetables.base import DagRunInfo, DataInterval, TimeRestriction, Timetable
 from airflow.timetables.interval import CronDataIntervalTimetable, DeltaDataIntervalTimetable
-from airflow.timetables.simple import NullTimetable, OnceTimetable
+from airflow.timetables.simple import DatasetTriggeredTimetable, NullTimetable, OnceTimetable
 from airflow.typing_compat import Literal
 from airflow.utils import timezone
 from airflow.utils.dag_cycle_tester import check_cycle
@@ -103,6 +106,7 @@ log = logging.getLogger(__name__)
 DEFAULT_VIEW_PRESETS = ['grid', 'graph', 'duration', 'gantt', 'landing_times']
 ORIENTATION_PRESETS = ['LR', 'TB', 'RL', 'BT']
 
+TAG_MAX_LEN = 100
 
 DagStateChangeCallback = Callable[[Context], None]
 ScheduleInterval = Union[None, str, timedelta, relativedelta]
@@ -111,6 +115,8 @@ ScheduleInterval = Union[None, str, timedelta, relativedelta]
 # but Mypy cannot handle that right now. Track progress of PEP 661 for progress.
 # See also: https://discuss.python.org/t/9126/7
 ScheduleIntervalArg = Union[ArgNotSet, ScheduleInterval]
+
+SLAMissCallback = Callable[["DAG", str, str, List["SlaMiss"], List[TaskInstance]], None]
 
 
 # Backward compatibility: If neither schedule_interval nor timetable is
@@ -183,6 +189,32 @@ def get_last_dagrun(dag_id, session, include_externally_triggered=False):
         query = query.filter(DR.external_trigger == expression.false())
     query = query.order_by(DR.execution_date.desc())
     return query.first()
+
+
+def get_dataset_triggered_next_run_info(dag_ids: List[str], *, session: Session) -> Dict[str, str]:
+    """
+    Given a list of dag_ids, get string representing how close any that are dataset triggered are
+    their next run, e.g. "1 of 2 datasets updated"
+    """
+    return {
+        x.dag_id: f"{x.ready} of {x.total} datasets updated"
+        for x in session.query(
+            DatasetDagRef.dag_id,
+            func.count().label("total"),
+            func.sum(case((DDRQ.target_dag_id.is_not(None), 1), else_=0)).label("ready"),
+        )
+        .join(
+            DDRQ,
+            and_(
+                DDRQ.dataset_id == DatasetDagRef.dataset_id,
+                DDRQ.target_dag_id == DatasetDagRef.dag_id,
+            ),
+            isouter=True,
+        )
+        .group_by(DatasetDagRef.dag_id)
+        .filter(DatasetDagRef.dag_id.in_(dag_ids))
+        .all()
+    }
 
 
 @functools.total_ordering
@@ -282,6 +314,9 @@ class DAG(LoggingMixin):
         ``Environment`` is used to render templates as string values.
     :param tags: List of tags to help filtering DAGs in the UI.
     :param schedule_on: List of upstream datasets if for use in triggering DAG runs.
+    :param owner_links: Dict of owners and their links, that will be clickable on the DAGs view UI.
+        Can be used as an HTTP link (for example the link to your Slack channel), or a mailto link.
+        e.g: {"dag_owner": "https://airflow.apache.org/"}
     """
 
     _comps = {
@@ -308,6 +343,8 @@ class DAG(LoggingMixin):
 
     parent_dag: Optional["DAG"] = None  # Gets set when DAGs are loaded
 
+    # NOTE: When updating arguments here, please also keep arguments in @dag()
+    # below in sync. (Search for 'def dag(' in this file.)
     def __init__(
         self,
         dag_id: str,
@@ -326,9 +363,7 @@ class DAG(LoggingMixin):
         max_active_tasks: int = conf.getint('core', 'max_active_tasks_per_dag'),
         max_active_runs: int = conf.getint('core', 'max_active_runs_per_dag'),
         dagrun_timeout: Optional[timedelta] = None,
-        sla_miss_callback: Optional[
-            Callable[["DAG", str, str, List["SlaMiss"], List[TaskInstance]], None]
-        ] = None,
+        sla_miss_callback: Optional[SLAMissCallback] = None,
         default_view: str = conf.get_mandatory_value('webserver', 'dag_default_view').lower(),
         orientation: str = conf.get_mandatory_value('webserver', 'dag_orientation'),
         catchup: bool = conf.getboolean('scheduler', 'catchup_by_default'),
@@ -342,9 +377,14 @@ class DAG(LoggingMixin):
         render_template_as_native_obj: bool = False,
         tags: Optional[List[str]] = None,
         schedule_on: Optional[Sequence["Dataset"]] = None,
+        owner_links: Optional[Dict[str, str]] = None,
     ):
         from airflow.utils.task_group import TaskGroup
 
+        if tags and any(len(tag) > TAG_MAX_LEN for tag in tags):
+            raise AirflowException(f"tag cannot be longer than {TAG_MAX_LEN} characters")
+
+        self.owner_links = owner_links if owner_links else {}
         self.user_defined_macros = user_defined_macros
         self.user_defined_filters = user_defined_filters
         if default_args and not isinstance(default_args, dict):
@@ -432,8 +472,8 @@ class DAG(LoggingMixin):
         if schedule_on:
             if not isinstance(schedule_on, Sequence):
                 raise ValueError("Param `schedule_on` must be Sequence[Dataset]")
-            self.schedule_interval = None
-            self.timetable = NullTimetable()
+            self.timetable = DatasetTriggeredTimetable()
+            self.schedule_interval = self.timetable.summary
         elif timetable:
             self.timetable = timetable
             self.schedule_interval = self.timetable.summary
@@ -489,16 +529,42 @@ class DAG(LoggingMixin):
         self.has_on_success_callback = self.on_success_callback is not None
         self.has_on_failure_callback = self.on_failure_callback is not None
 
-        self.doc_md = doc_md
-
         self._access_control = DAG._upgrade_outdated_dag_access_control(access_control)
         self.is_paused_upon_creation = is_paused_upon_creation
 
         self.jinja_environment_kwargs = jinja_environment_kwargs
         self.render_template_as_native_obj = render_template_as_native_obj
+
+        self.doc_md = self.get_doc_md(doc_md)
+
         self.tags = tags or []
         self._task_group = TaskGroup.create_root(self)
         self.validate_schedule_and_params()
+        wrong_links = dict(self.iter_invalid_owner_links())
+        if wrong_links:
+            raise AirflowException(
+                "Wrong link format was used for the owner. Use a valid link \n"
+                f"Bad formatted links are: {wrong_links}"
+            )
+
+    def get_doc_md(self, doc_md: Optional[str]) -> Optional[str]:
+        if doc_md is None:
+            return doc_md
+
+        env = self.get_template_env(force_sandboxed=True)
+
+        if not doc_md.endswith('.md'):
+            template = jinja2.Template(doc_md)
+        else:
+            try:
+                template = env.get_template(doc_md)
+            except jinja2.exceptions.TemplateNotFound:
+                return f"""
+                # Templating Error!
+                Not able to find the template file: `{doc_md}`.
+                """
+
+        return template.render()
 
     def _check_schedule_interval_matches_timetable(self) -> bool:
         """Check ``schedule_interval`` and ``timetable`` match.
@@ -2182,6 +2248,8 @@ class DAG(LoggingMixin):
 
         :param task: the task you want to add
         """
+        from airflow.utils.task_group import TaskGroupContext
+
         if not self.start_date and not task.start_date:
             raise AirflowException("DAG is missing the start_date parameter")
         # if the task has no start date, assign it the same as the DAG
@@ -2200,15 +2268,22 @@ class DAG(LoggingMixin):
         elif task.end_date and self.end_date:
             task.end_date = min(task.end_date, self.end_date)
 
+        task_id = task.task_id
+        if not task.task_group:
+            task_group = TaskGroupContext.get_current_task_group(self)
+            if task_group:
+                task_id = task_group.child_id(task_id)
+                task_group.add(task)
+
         if (
-            task.task_id in self.task_dict and self.task_dict[task.task_id] is not task
-        ) or task.task_id in self._task_group.used_group_ids:
-            raise DuplicateTaskIdFound(f"Task id '{task.task_id}' has already been added to the DAG")
+            task_id in self.task_dict and self.task_dict[task_id] is not task
+        ) or task_id in self._task_group.used_group_ids:
+            raise DuplicateTaskIdFound(f"Task id '{task_id}' has already been added to the DAG")
         else:
-            self.task_dict[task.task_id] = task
+            self.task_dict[task_id] = task
             task.dag = self
             # Add task_id to used_group_ids to prevent group_id and task_id collisions.
-            self._task_group.used_group_ids.add(task.task_id)
+            self._task_group.used_group_ids.add(task_id)
 
         self.task_count = len(self.task_dict)
 
@@ -2495,10 +2570,10 @@ class DAG(LoggingMixin):
             orm_dag.last_parsed_time = timezone.utcnow()
             orm_dag.default_view = dag.default_view
             orm_dag.description = dag.description
-            orm_dag.schedule_interval = dag.schedule_interval
             orm_dag.max_active_tasks = dag.max_active_tasks
             orm_dag.max_active_runs = dag.max_active_runs
             orm_dag.has_task_concurrency_limits = any(t.max_active_tis_per_dag is not None for t in dag.tasks)
+            orm_dag.schedule_interval = dag.schedule_interval
             orm_dag.timetable_description = dag.timetable.description
 
             run: Optional[DagRun] = most_recent_runs.get(dag.dag_id)
@@ -2523,6 +2598,14 @@ class DAG(LoggingMixin):
                     dag_tag_orm = DagTag(name=dag_tag, dag_id=dag.dag_id)
                     orm_dag.tags.append(dag_tag_orm)
                     session.add(dag_tag_orm)
+
+            orm_dag_links = orm_dag.dag_owner_links or []
+            for orm_dag_link in orm_dag_links:
+                if orm_dag_link not in dag.owner_links:
+                    session.delete(orm_dag_link)
+            for owner_name, owner_link in dag.owner_links.items():
+                dag_owner_orm = DagOwnerAttributes(dag_id=dag.dag_id, owner=owner_name, link=owner_link)
+                session.add(dag_owner_orm)
 
         DagCode.bulk_sync_to_db(filelocs, session=session)
 
@@ -2748,20 +2831,60 @@ class DAG(LoggingMixin):
                     "DAG Schedule must be None, if there are any required params without default values"
                 )
 
+    def iter_invalid_owner_links(self) -> Iterator[Tuple[str, str]]:
+        """Parses a given link, and verifies if it's a valid URL, or a 'mailto' link.
+        Returns an iterator of invalid (owner, link) pairs.
+        """
+        for owner, link in self.owner_links.items():
+            result = urlsplit(link)
+            if result.scheme == "mailto":
+                # netloc is not existing for 'mailto' link, so we are checking that the path is parsed
+                if not result.path:
+                    yield result.path, link
+            elif not result.scheme or not result.netloc:
+                yield owner, link
+
 
 class DagTag(Base):
     """A tag name per dag, to allow quick filtering in the DAG view."""
 
     __tablename__ = "dag_tag"
-    name = Column(String(100), primary_key=True)
+    name = Column(String(TAG_MAX_LEN), primary_key=True)
     dag_id = Column(
-        String(ID_LEN),
+        StringID(),
         ForeignKey('dag.dag_id', name='dag_tag_dag_id_fkey', ondelete='CASCADE'),
         primary_key=True,
     )
 
     def __repr__(self):
         return self.name
+
+
+class DagOwnerAttributes(Base):
+    """
+    Table defining different owner attributes. For example, a link for an owner that will be passed as
+    a hyperlink to the DAGs view
+    """
+
+    __tablename__ = "dag_owner_attributes"
+    dag_id = Column(
+        StringID(),
+        ForeignKey('dag.dag_id', name='dag.dag_id', ondelete='CASCADE'),
+        nullable=False,
+        primary_key=True,
+    )
+    owner = Column(String(500), primary_key=True, nullable=False)
+    link = Column(String(500), nullable=False)
+
+    def __repr__(self):
+        return f"<DagOwnerAttributes: dag_id={self.dag_id}, owner={self.owner}, link={self.link}>"
+
+    @classmethod
+    def get_all(cls, session) -> Dict[str, Dict[str, str]]:
+        dag_links: dict = collections.defaultdict(dict)
+        for obj in session.query(cls):
+            dag_links[obj.dag_id].update({obj.owner: obj.link})
+        return dag_links
 
 
 class DagModel(Base):
@@ -2771,8 +2894,8 @@ class DagModel(Base):
     """
     These items are stored in the database for state related information
     """
-    dag_id = Column(String(ID_LEN), primary_key=True)
-    root_dag_id = Column(String(ID_LEN))
+    dag_id = Column(StringID(), primary_key=True)
+    root_dag_id = Column(StringID())
     # A DAG can be paused from the UI / DB
     # Set this default value of is_paused based on a configuration value!
     is_paused_at_creation = conf.getboolean('core', 'dags_are_paused_at_creation')
@@ -2809,6 +2932,10 @@ class DagModel(Base):
     timetable_description = Column(String(1000), nullable=True)
     # Tags for view filter
     tags = relationship('DagTag', cascade='all, delete, delete-orphan', backref=backref('dag'))
+    # Dag owner links for DAGs view
+    dag_owner_links = relationship(
+        'DagOwnerAttributes', cascade='all, delete, delete-orphan', backref=backref('dag')
+    )
 
     max_active_tasks = Column(Integer, nullable=False)
     max_active_runs = Column(Integer, nullable=True)
@@ -3055,8 +3182,48 @@ class DagModel(Base):
             self.next_dagrun_create_after,
         )
 
+    @provide_session
+    def get_dataset_triggered_next_run_info(self, *, session=NEW_SESSION) -> Optional[str]:
+        if self.schedule_interval != "Dataset":
+            return None
+        return get_dataset_triggered_next_run_info([self.dag_id], session=session)[self.dag_id]
 
-def dag(*dag_args, **dag_kwargs):
+
+# NOTE: Please keep the list of arguments in sync with DAG.__init__.
+# Only exception: dag_id here should have a default value, but not in DAG.
+def dag(
+    dag_id: str = "",
+    description: Optional[str] = None,
+    schedule_interval: ScheduleIntervalArg = NOTSET,
+    timetable: Optional[Timetable] = None,
+    start_date: Optional[datetime] = None,
+    end_date: Optional[datetime] = None,
+    full_filepath: Optional[str] = None,
+    template_searchpath: Optional[Union[str, Iterable[str]]] = None,
+    template_undefined: Type[jinja2.StrictUndefined] = jinja2.StrictUndefined,
+    user_defined_macros: Optional[Dict] = None,
+    user_defined_filters: Optional[Dict] = None,
+    default_args: Optional[Dict] = None,
+    concurrency: Optional[int] = None,
+    max_active_tasks: int = conf.getint('core', 'max_active_tasks_per_dag'),
+    max_active_runs: int = conf.getint('core', 'max_active_runs_per_dag'),
+    dagrun_timeout: Optional[timedelta] = None,
+    sla_miss_callback: Optional[SLAMissCallback] = None,
+    default_view: str = conf.get_mandatory_value('webserver', 'dag_default_view').lower(),
+    orientation: str = conf.get_mandatory_value('webserver', 'dag_orientation'),
+    catchup: bool = conf.getboolean('scheduler', 'catchup_by_default'),
+    on_success_callback: Optional[DagStateChangeCallback] = None,
+    on_failure_callback: Optional[DagStateChangeCallback] = None,
+    doc_md: Optional[str] = None,
+    params: Optional[Dict] = None,
+    access_control: Optional[Dict] = None,
+    is_paused_upon_creation: Optional[bool] = None,
+    jinja_environment_kwargs: Optional[Dict] = None,
+    render_template_as_native_obj: bool = False,
+    tags: Optional[List[str]] = None,
+    schedule_on: Optional[Sequence["Dataset"]] = None,
+    owner_links: Optional[Dict[str, str]] = None,
+) -> Callable[[Callable], Callable[..., DAG]]:
     """
     Python dag decorator. Wraps a function into an Airflow DAG.
     Accepts kwargs for operator kwarg. Can be used to parameterize DAGs.
@@ -3065,11 +3232,7 @@ def dag(*dag_args, **dag_kwargs):
     :param dag_kwargs: Kwargs for DAG object.
     """
 
-    def wrapper(f: Callable):
-        # Get dag initializer signature and bind it to validate that dag_args, and dag_kwargs are correct
-        dag_sig = signature(DAG.__init__)
-        dag_bound_args = dag_sig.bind_partial(*dag_args, **dag_kwargs)
-
+    def wrapper(f: Callable) -> Callable[..., DAG]:
         @functools.wraps(f)
         def factory(*args, **kwargs):
             # Generate signature for decorated function and bind the arguments when called
@@ -3079,12 +3242,40 @@ def dag(*dag_args, **dag_kwargs):
             # Apply defaults to capture default values if set.
             f_sig.apply_defaults()
 
-            # Set function name as dag_id if not set
-            dag_id = dag_bound_args.arguments.get('dag_id', f.__name__)
-            dag_bound_args.arguments['dag_id'] = dag_id
-
             # Initialize DAG with bound arguments
-            with DAG(*dag_bound_args.args, **dag_bound_args.kwargs) as dag_obj:
+            with DAG(
+                dag_id or f.__name__,
+                description=description,
+                schedule_interval=schedule_interval,
+                timetable=timetable,
+                start_date=start_date,
+                end_date=end_date,
+                full_filepath=full_filepath,
+                template_searchpath=template_searchpath,
+                template_undefined=template_undefined,
+                user_defined_macros=user_defined_macros,
+                user_defined_filters=user_defined_filters,
+                default_args=default_args,
+                concurrency=concurrency,
+                max_active_tasks=max_active_tasks,
+                max_active_runs=max_active_runs,
+                dagrun_timeout=dagrun_timeout,
+                sla_miss_callback=sla_miss_callback,
+                default_view=default_view,
+                orientation=orientation,
+                catchup=catchup,
+                on_success_callback=on_success_callback,
+                on_failure_callback=on_failure_callback,
+                doc_md=doc_md,
+                params=params,
+                access_control=access_control,
+                is_paused_upon_creation=is_paused_upon_creation,
+                jinja_environment_kwargs=jinja_environment_kwargs,
+                render_template_as_native_obj=render_template_as_native_obj,
+                tags=tags,
+                schedule_on=schedule_on,
+                owner_links=owner_links,
+            ) as dag_obj:
                 # Set DAG documentation from function documentation.
                 if f.__doc__:
                     dag_obj.doc_md = f.__doc__

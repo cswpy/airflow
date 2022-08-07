@@ -17,6 +17,7 @@
 # under the License.
 #
 import json
+import os
 import unittest
 from base64 import b64encode
 from datetime import datetime, timedelta, timezone
@@ -24,6 +25,7 @@ from unittest import mock
 
 import boto3
 import pytest
+from botocore.config import Config
 from moto.core import ACCOUNT_ID
 
 from airflow.models import Connection
@@ -32,6 +34,7 @@ from airflow.providers.amazon.aws.hooks.base_aws import (
     BaseSessionFactory,
     resolve_session_factory,
 )
+from airflow.providers.amazon.aws.utils.connection_wrapper import AwsConnectionWrapper
 from tests.test_utils.config import conf_vars
 
 try:
@@ -41,6 +44,11 @@ except ImportError:
     mock_dynamodb2 = None
     mock_sts = None
     mock_iam = None
+
+MOCK_AWS_CONN_ID = "mock-conn-id"
+MOCK_CONN_TYPE = "aws"
+MOCK_BOTO3_SESSION = mock.MagicMock(return_value="Mock boto3.session.Session")
+
 
 SAML_ASSERTION = """
 <?xml version="1.0"?>
@@ -114,7 +122,7 @@ class CustomSessionFactory(BaseSessionFactory):
         return mock.MagicMock()
 
 
-class TestAwsBaseHook:
+class TestSessionFactory:
     @conf_vars(
         {("aws", "session_factory"): "tests.providers.amazon.aws.hooks.test_base_aws.CustomSessionFactory"}
     )
@@ -131,6 +139,87 @@ class TestAwsBaseHook:
         cls = resolve_session_factory()
         assert issubclass(cls, BaseSessionFactory)
 
+    @pytest.mark.parametrize(
+        "mock_conn",
+        [
+            Connection(conn_type=MOCK_CONN_TYPE, conn_id=MOCK_AWS_CONN_ID),
+            AwsConnectionWrapper(conn=Connection(conn_type=MOCK_CONN_TYPE, conn_id=MOCK_AWS_CONN_ID)),
+        ],
+    )
+    def test_conn_property(self, mock_conn):
+        sf = BaseSessionFactory(conn=mock_conn, region_name=None, config=None)
+        session_factory_conn = sf.conn
+        assert isinstance(session_factory_conn, AwsConnectionWrapper)
+        assert session_factory_conn.conn_id == MOCK_AWS_CONN_ID
+        assert session_factory_conn.conn_type == MOCK_CONN_TYPE
+        assert sf.conn is session_factory_conn
+
+    def test_empty_conn_property(self):
+        sf = BaseSessionFactory(conn=None, region_name=None, config=None)
+        assert isinstance(sf.conn, AwsConnectionWrapper)
+
+    @pytest.mark.parametrize(
+        "region_name,conn_region_name",
+        [
+            ("eu-west-1", "cn-north-1"),
+            ("eu-west-1", None),
+            (None, "cn-north-1"),
+            (None, None),
+        ],
+    )
+    def test_resolve_region_name(self, region_name, conn_region_name):
+        conn = AwsConnectionWrapper(
+            conn=Connection(conn_type=MOCK_CONN_TYPE, conn_id=MOCK_AWS_CONN_ID),
+            region_name=conn_region_name,
+        )
+        sf = BaseSessionFactory(conn=conn, region_name=region_name, config=None)
+        expected = region_name or conn_region_name
+        assert sf.region_name == expected
+
+    @pytest.mark.parametrize(
+        "botocore_config, conn_botocore_config",
+        [
+            (Config(s3={"us_east_1_regional_endpoint": "regional"}), None),
+            (Config(s3={"us_east_1_regional_endpoint": "regional"}), Config(region_name="ap-southeast-1")),
+            (None, Config(region_name="ap-southeast-1")),
+            (None, None),
+        ],
+    )
+    def test_resolve_botocore_config(self, botocore_config, conn_botocore_config):
+        conn = AwsConnectionWrapper(
+            conn=Connection(conn_type=MOCK_CONN_TYPE, conn_id=MOCK_AWS_CONN_ID),
+            botocore_config=conn_botocore_config,
+        )
+        sf = BaseSessionFactory(conn=conn, config=botocore_config)
+        expected = botocore_config or conn_botocore_config
+        assert sf.config == expected
+
+    @pytest.mark.parametrize("region_name", ["eu-central-1", None])
+    @mock.patch("boto3.session.Session", new_callable=mock.PropertyMock, return_value=MOCK_BOTO3_SESSION)
+    def test_create_session_boto3_credential_strategy(self, mock_boto3_session, region_name, caplog):
+        sf = BaseSessionFactory(conn=AwsConnectionWrapper(conn=None), region_name=region_name, config=None)
+        session = sf.create_session()
+        mock_boto3_session.assert_called_once_with(region_name=region_name)
+        assert session == MOCK_BOTO3_SESSION
+        logging_message = "No connection ID provided. Fallback on boto3 credential strategy"
+        assert any(logging_message in log_text for log_text in caplog.messages)
+
+    @pytest.mark.parametrize("region_name", ["eu-central-1", None])
+    @mock.patch("boto3.session.Session", new_callable=mock.PropertyMock, return_value=MOCK_BOTO3_SESSION)
+    def test_create_session_from_credentials(self, mock_boto3_session, region_name):
+        mock_conn = AwsConnectionWrapper(conn=Connection(conn_type=MOCK_CONN_TYPE, conn_id=MOCK_AWS_CONN_ID))
+        sf = BaseSessionFactory(conn=mock_conn, region_name=region_name, config=None)
+        session = sf.create_session()
+        mock_boto3_session.assert_called_once_with(
+            aws_access_key_id=mock_conn.aws_access_key_id,
+            aws_secret_access_key=mock_conn.aws_secret_access_key,
+            aws_session_token=mock_conn.aws_session_token,
+            region_name=region_name,
+        )
+        assert session == MOCK_BOTO3_SESSION
+
+
+class TestAwsBaseHook:
     @unittest.skipIf(mock_emr is None, 'mock_emr package not present')
     @mock_emr
     def test_get_client_type_returns_a_boto3_client_of_the_requested_type(self):
@@ -260,80 +349,6 @@ class TestAwsBaseHook:
 
         assert table.item_count == 0
 
-    @mock.patch.object(AwsBaseHook, 'get_connection')
-    def test_get_credentials_from_login_with_token(self, mock_get_connection):
-        mock_connection = Connection(
-            login='aws_access_key_id',
-            password='aws_secret_access_key',
-            extra='{"aws_session_token": "test_token"}',
-        )
-        mock_get_connection.return_value = mock_connection
-        hook = AwsBaseHook(aws_conn_id='aws_default', client_type='airflow_test')
-        credentials_from_hook = hook.get_credentials()
-        assert credentials_from_hook.access_key == 'aws_access_key_id'
-        assert credentials_from_hook.secret_key == 'aws_secret_access_key'
-        assert credentials_from_hook.token == 'test_token'
-
-    @mock.patch.object(AwsBaseHook, 'get_connection')
-    def test_get_credentials_from_login_without_token(self, mock_get_connection):
-        mock_connection = Connection(
-            login='aws_access_key_id',
-            password='aws_secret_access_key',
-        )
-
-        mock_get_connection.return_value = mock_connection
-        hook = AwsBaseHook(aws_conn_id='aws_default', client_type='spam')
-        credentials_from_hook = hook.get_credentials()
-        assert credentials_from_hook.access_key == 'aws_access_key_id'
-        assert credentials_from_hook.secret_key == 'aws_secret_access_key'
-        assert credentials_from_hook.token is None
-
-    @mock.patch.object(AwsBaseHook, 'get_connection')
-    def test_get_credentials_from_extra_with_token(self, mock_get_connection):
-        mock_connection = Connection(
-            extra='{"aws_access_key_id": "aws_access_key_id",'
-            '"aws_secret_access_key": "aws_secret_access_key",'
-            ' "aws_session_token": "session_token"}'
-        )
-        mock_get_connection.return_value = mock_connection
-        hook = AwsBaseHook(aws_conn_id='aws_default', client_type='airflow_test')
-        credentials_from_hook = hook.get_credentials()
-        assert credentials_from_hook.access_key == 'aws_access_key_id'
-        assert credentials_from_hook.secret_key == 'aws_secret_access_key'
-        assert credentials_from_hook.token == 'session_token'
-
-    @mock.patch.object(AwsBaseHook, 'get_connection')
-    def test_get_credentials_from_extra_without_token(self, mock_get_connection):
-        mock_connection = Connection(
-            extra='{"aws_access_key_id": "aws_access_key_id",'
-            '"aws_secret_access_key": "aws_secret_access_key"}'
-        )
-        mock_get_connection.return_value = mock_connection
-        hook = AwsBaseHook(aws_conn_id='aws_default', client_type='airflow_test')
-        credentials_from_hook = hook.get_credentials()
-        assert credentials_from_hook.access_key == 'aws_access_key_id'
-        assert credentials_from_hook.secret_key == 'aws_secret_access_key'
-        assert credentials_from_hook.token is None
-
-    @mock.patch(
-        'airflow.providers.amazon.aws.hooks.base_aws._parse_s3_config',
-        return_value=('aws_access_key_id', 'aws_secret_access_key'),
-    )
-    @mock.patch.object(AwsBaseHook, 'get_connection')
-    def test_get_credentials_from_extra_with_s3_config_and_profile(
-        self, mock_get_connection, mock_parse_s3_config
-    ):
-        mock_connection = Connection(
-            extra='{"s3_config_format": "aws", '
-            '"profile": "test", '
-            '"s3_config_file": "aws-credentials", '
-            '"region_name": "us-east-1"}'
-        )
-        mock_get_connection.return_value = mock_connection
-        hook = AwsBaseHook(aws_conn_id='aws_default', client_type='airflow_test')
-        hook._get_credentials(region_name=None)
-        mock_parse_s3_config.assert_called_once_with('aws-credentials', 'aws', 'test')
-
     @unittest.skipIf(mock_sts is None, 'mock_sts package not present')
     @mock.patch.object(AwsBaseHook, 'get_connection')
     @mock_sts
@@ -394,7 +409,11 @@ class TestAwsBaseHook:
     @mock.patch.object(AwsBaseHook, 'get_connection')
     @mock_sts
     def test_get_credentials_from_role_arn(self, mock_get_connection):
-        mock_connection = Connection(extra='{"role_arn":"arn:aws:iam::123456:role/role_arn"}')
+        mock_connection = Connection(
+            conn_id='aws_default',
+            conn_type=MOCK_CONN_TYPE,
+            extra='{"role_arn":"arn:aws:iam::123456:role/role_arn"}',
+        )
         mock_get_connection.return_value = mock_connection
         hook = AwsBaseHook(aws_conn_id='aws_default', client_type='airflow_test')
         credentials_from_hook = hook.get_credentials()
@@ -498,6 +517,7 @@ class TestAwsBaseHook:
         duration_seconds = 901
 
         mock_connection = Connection(
+            conn_id=MOCK_AWS_CONN_ID,
             extra=json.dumps(
                 {
                     "role_arn": role_arn,
@@ -512,7 +532,7 @@ class TestAwsBaseHook:
                     },
                     "assume_role_kwargs": {"DurationSeconds": duration_seconds},
                 }
-            )
+            ),
         )
         mock_get_connection.return_value = mock_connection
 
@@ -723,6 +743,33 @@ class TestAwsBaseHook:
         result, message = hook.test_connection()
         assert result
         assert hook.client_type == "s3"  # Same client_type which defined during initialisation
+
+    @mock.patch.dict(os.environ, {f"AIRFLOW_CONN_{MOCK_AWS_CONN_ID.upper()}": "aws://"})
+    def test_conn_config_conn_id_exists(self):
+        """Test retrieve connection config if aws_conn_id exists."""
+        hook = AwsBaseHook(aws_conn_id=MOCK_AWS_CONN_ID)
+        conn_config_exist = hook.conn_config
+        assert conn_config_exist is hook.conn_config, "Expected cached Connection Config"
+        assert isinstance(conn_config_exist, AwsConnectionWrapper)
+        assert conn_config_exist
+
+    @pytest.mark.parametrize("aws_conn_id", ["", None], ids=["empty", "None"])
+    def test_conn_config_conn_id_empty(self, aws_conn_id):
+        """Test retrieve connection config if aws_conn_id empty or None."""
+        conn_config_empty = AwsBaseHook(aws_conn_id=aws_conn_id).conn_config
+        assert isinstance(conn_config_empty, AwsConnectionWrapper)
+        assert not conn_config_empty
+
+    def test_conn_config_conn_id_not_exists(self):
+        """Test fallback connection config if aws_conn_id not exists."""
+        warning_message = (
+            r"Unable to find AWS Connection ID '.*', switching to empty\. "
+            r"This behaviour is deprecated and will be removed in a future releases"
+        )
+        with pytest.warns(DeprecationWarning, match=warning_message):
+            conn_config_fallback_not_exists = AwsBaseHook(aws_conn_id="aws-conn-not-exists").conn_config
+        assert isinstance(conn_config_fallback_not_exists, AwsConnectionWrapper)
+        assert not conn_config_fallback_not_exists
 
 
 class ThrowErrorUntilCount:

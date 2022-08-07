@@ -28,6 +28,9 @@ nameOverride: ""
 # Provide a Kubernetes version (used for API Version selection) to override the auto-detected version
 kubeVersionOverride: ""
 
+# Max number of old replicasets to retain. Can be overridden by each deployment's revisionHistoryLimit
+revisionHistoryLimit: ~
+
 # User and group of airflow user
 uid: 50000
 gid: 0
@@ -46,10 +49,10 @@ airflowHome: /opt/airflow
 defaultAirflowRepository: apache/airflow
 
 # Default airflow tag to deploy
-defaultAirflowTag: "2.3.2"
+defaultAirflowTag: "2.3.3"
 
 # Airflow version (Used to make some decisions based on Airflow Version being deployed)
-airflowVersion: "2.3.2"
+airflowVersion: "2.3.3"
 
 # Images
 images:
@@ -265,7 +268,7 @@ enableBuiltInSecretEnvVars:
 
 # Extra secrets that will be managed by the chart
 # (You can use them with extraEnv or extraEnvFrom or some of the extraVolumes values).
-# The format is "key/value" where
+# The format for secret data is "key/value" where
 #    * key (can be templated) is the name of the secret that will be created
 #    * value: an object with the standard 'data' or 'stringData' key (or both).
 #          The value associated with those keys must be a string (can be templated)
@@ -274,6 +277,8 @@ extraSecrets: {}
 # extraSecrets:
 #   '{{ .Release.Name }}-airflow-connections':
 #     type: 'Opaque'
+#     labels:
+#       my.custom.label/v1: my_custom_label_value_1
 #     data: |
 #       AIRFLOW_CONN_GCP: 'base64_encoded_gcp_conn_string'
 #       AIRFLOW_CONN_AWS: 'base64_encoded_aws_conn_string'
@@ -285,7 +290,7 @@ extraSecrets: {}
 
 # Extra ConfigMaps that will be managed by the chart
 # (You can use them with extraEnv or extraEnvFrom or some of the extraVolumes values).
-# The format is "key/value" where
+# The format for configmap data is "key/value" where
 #    * key (can be templated) is the name of the configmap that will be created
 #    * value: an object with the standard 'data' key.
 #          The value associated with this keys must be a string (can be templated)
@@ -293,6 +298,8 @@ extraConfigMaps: {}
 # eg:
 # extraConfigMaps:
 #   '{{ .Release.Name }}-airflow-variables':
+#     labels:
+#       my.custom.label/v2: my_custom_label_value_2
 #     data: |
 #       AIRFLOW_VAR_HELLO_MESSAGE: "Hi!"
 #       AIRFLOW_VAR_KUBERNETES_NAMESPACE: "{{ .Release.Namespace }}"
@@ -431,6 +438,8 @@ kerberos:
 workers:
   # Number of airflow celery workers in StatefulSet
   replicas: 1
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
 
   # Command to use when running Airflow workers (templated).
   command: ~
@@ -605,6 +614,8 @@ scheduler:
   # Airflow 2.0 allows users to run multiple schedulers,
   # However this feature is only recommended for MySQL 8+ and Postgres
   replicas: 1
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
 
   # Command to use when running the Airflow scheduler (templated).
   command: ~
@@ -853,6 +864,8 @@ webserver:
 
   # Number of webservers
   replicas: 1
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
 
   # Command to use when running the Airflow webserver (templated).
   command: ~
@@ -986,6 +999,8 @@ triggerer:
   enabled: true
   # Number of airflow triggerers in the deployment
   replicas: 1
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
 
   # Command to use when running Airflow triggerers (templated).
   command: ~
@@ -1076,6 +1091,8 @@ dagProcessor:
   enabled: false
   # Number of airflow dag processors in the deployment
   replicas: 1
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
 
   # Command to use when running Airflow dag processors (templated).
   command: ~
@@ -1166,6 +1183,8 @@ flower:
   # Enable flower.
   # If True, and using CeleryExecutor/CeleryKubernetesExecutor, will deploy flower app.
   enabled: false
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
 
   # Command to use when running flower (templated).
   command: ~
@@ -1257,6 +1276,8 @@ flower:
 # StatsD settings
 statsd:
   enabled: true
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
 
   # Create ServiceAccount
   serviceAccount:
@@ -1304,6 +1325,8 @@ statsd:
 pgbouncer:
   # Enable PgBouncer
   enabled: false
+  # Max number of old replicasets to retain
+  revisionHistoryLimit: ~
   # Command to use for PgBouncer(templated).
   command: ["pgbouncer", "-u", "nobody", "/etc/pgbouncer/pgbouncer.ini"]
   # Args to use for PgBouncer(templated).
