@@ -15,15 +15,17 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+from __future__ import annotations
+
 import contextlib
 import io
 import os
 import tempfile
-import unittest
 from datetime import datetime, timedelta
 from unittest import mock
 from unittest.mock import MagicMock
 
+import pendulum
 import pytest
 
 from airflow import settings
@@ -45,15 +47,15 @@ DEFAULT_DATE = timezone.make_aware(datetime(2015, 1, 1), timezone=timezone.utc)
 # TODO: Check if tests needs side effects - locally there's missing DAG
 
 
-class TestCliDags(unittest.TestCase):
+class TestCliDags:
     @classmethod
-    def setUpClass(cls):
+    def setup_class(cls):
         cls.dagbag = DagBag(include_examples=True)
         cls.dagbag.sync_to_db()
         cls.parser = cli_parser.get_parser()
 
     @classmethod
-    def tearDownClass(cls) -> None:
+    def teardown_class(cls) -> None:
         clear_db_runs()
         clear_db_dags()
 
@@ -77,6 +79,30 @@ class TestCliDags(unittest.TestCase):
         with create_session() as session:
             serialized_dags_after_reserialize = session.query(SerializedDagModel).all()
         assert len(serialized_dags_after_reserialize) >= 40  # Serialized DAGs back
+
+    def test_reserialize_should_support_subdir_argument(self):
+        # Run clear of serialized dags
+        dag_command.dag_reserialize(self.parser.parse_args(['dags', 'reserialize', "--clear-only"]))
+
+        # Assert no serialized Dags
+        with create_session() as session:
+            serialized_dags_after_clear = session.query(SerializedDagModel).all()
+        assert len(serialized_dags_after_clear) == 0
+
+        # Serialize manually
+        dag_path = self.dagbag.dags['example_bash_operator'].fileloc
+        # Set default value of include_examples parameter to false
+        dagbag_default = list(DagBag.__init__.__defaults__)
+        dagbag_default[1] = False
+        with mock.patch(
+            'airflow.cli.commands.dag_command.DagBag.__init__.__defaults__', tuple(dagbag_default)
+        ):
+            dag_command.dag_reserialize(self.parser.parse_args(['dags', 'reserialize', '--subdir', dag_path]))
+
+        # Check serialized DAG are back
+        with create_session() as session:
+            serialized_dags_after_reserialize = session.query(SerializedDagModel).all()
+        assert len(serialized_dags_after_reserialize) == 1  # Serialized DAG back
 
     @mock.patch("airflow.cli.commands.dag_command.DAG.run")
     def test_backfill(self, mock_run):
@@ -124,7 +150,7 @@ class TestCliDags(unittest.TestCase):
 
         output = stdout.getvalue()
         assert f"Dry run of DAG example_bash_operator on {DEFAULT_DATE.isoformat()}\n" in output
-        assert "Task runme_0\n" in output
+        assert "Task runme_0 located in DAG example_bash_operator\n" in output
 
         mock_run.assert_not_called()  # Dry run shouldn't run the backfill
 
@@ -175,6 +201,33 @@ class TestCliDags(unittest.TestCase):
             continue_on_failures=False,
         )
         mock_run.reset_mock()
+
+        with contextlib.redirect_stdout(io.StringIO()) as stdout:
+            dag_command.dag_backfill(
+                self.parser.parse_args(
+                    [
+                        'dags',
+                        'backfill',
+                        'example_branch_(python_){0,1}operator(_decorator){0,1}',
+                        '--task-regex',
+                        'run_this_first',
+                        '--dry-run',
+                        '--treat-dag-as-regex',
+                        '--start-date',
+                        DEFAULT_DATE.isoformat(),
+                    ]
+                ),
+            )
+
+        output = stdout.getvalue()
+
+        assert (
+            f"Dry run of DAG example_branch_python_operator_decorator on "
+            f"{DEFAULT_DATE.isoformat()}\n" in output
+        )
+        assert "Task run_this_first located in DAG example_branch_python_operator_decorator\n" in output
+        assert f"Dry run of DAG example_branch_operator on {DEFAULT_DATE.isoformat()}\n" in output
+        assert "Task run_this_first located in DAG example_branch_operator\n" in output
 
     @mock.patch("airflow.cli.commands.dag_command.get_dag")
     def test_backfill_fails_without_loading_dags(self, mock_get_dag):
@@ -325,11 +378,11 @@ class TestCliDags(unittest.TestCase):
 
     def test_next_execution(self):
         dag_ids = [
-            'example_bash_operator',  # schedule_interval is '0 0 * * *'
-            'latest_only',  # schedule_interval is timedelta(hours=4)
-            'example_python_operator',  # schedule_interval=None
-            'example_xcom',
-        ]  # schedule_interval="@once"
+            'example_bash_operator',  # schedule='0 0 * * *'
+            'latest_only',  # schedule=timedelta(hours=4)
+            'example_python_operator',  # schedule=None
+            'example_xcom',  # schedule="@once"
+        ]
 
         # Delete DagRuns
         with create_session() as session:
@@ -563,33 +616,66 @@ class TestCliDags(unittest.TestCase):
             is None
         )
 
-    @mock.patch("airflow.cli.commands.dag_command.DebugExecutor")
     @mock.patch("airflow.cli.commands.dag_command.get_dag")
-    def test_dag_test(self, mock_get_dag, mock_executor):
+    def test_dag_test(self, mock_get_dag):
         cli_args = self.parser.parse_args(['dags', 'test', 'example_bash_operator', DEFAULT_DATE.isoformat()])
         dag_command.dag_test(cli_args)
 
         mock_get_dag.assert_has_calls(
             [
                 mock.call(subdir=cli_args.subdir, dag_id='example_bash_operator'),
-                mock.call().clear(
-                    start_date=cli_args.execution_date,
-                    end_date=cli_args.execution_date,
-                    dag_run_state=False,
+                mock.call().test(
+                    execution_date=timezone.parse(DEFAULT_DATE.isoformat()), run_conf=None, session=mock.ANY
                 ),
-                mock.call().run(
-                    executor=mock_executor.return_value,
-                    start_date=cli_args.execution_date,
-                    end_date=cli_args.execution_date,
-                    run_at_least_once=True,
+            ]
+        )
+
+    @mock.patch("airflow.cli.commands.dag_command.get_dag")
+    @mock.patch("airflow.utils.timezone.utcnow")
+    def test_dag_test_no_execution_date(self, mock_utcnow, mock_get_dag):
+        now = pendulum.now()
+        mock_utcnow.return_value = now
+        cli_args = self.parser.parse_args(['dags', 'test', 'example_bash_operator'])
+
+        assert cli_args.execution_date is None
+
+        dag_command.dag_test(cli_args)
+
+        mock_get_dag.assert_has_calls(
+            [
+                mock.call(subdir=cli_args.subdir, dag_id='example_bash_operator'),
+                mock.call().test(execution_date=mock.ANY, run_conf=None, session=mock.ANY),
+            ]
+        )
+
+    @mock.patch("airflow.cli.commands.dag_command.get_dag")
+    def test_dag_test_conf(self, mock_get_dag):
+        cli_args = self.parser.parse_args(
+            [
+                'dags',
+                'test',
+                'example_bash_operator',
+                DEFAULT_DATE.isoformat(),
+                "-c",
+                "{\"dag_run_conf_param\": \"param_value\"}",
+            ]
+        )
+        dag_command.dag_test(cli_args)
+
+        mock_get_dag.assert_has_calls(
+            [
+                mock.call(subdir=cli_args.subdir, dag_id='example_bash_operator'),
+                mock.call().test(
+                    execution_date=timezone.parse(DEFAULT_DATE.isoformat()),
+                    run_conf={"dag_run_conf_param": "param_value"},
+                    session=mock.ANY,
                 ),
             ]
         )
 
     @mock.patch("airflow.cli.commands.dag_command.render_dag", return_value=MagicMock(source="SOURCE"))
-    @mock.patch("airflow.cli.commands.dag_command.DebugExecutor")
     @mock.patch("airflow.cli.commands.dag_command.get_dag")
-    def test_dag_test_show_dag(self, mock_get_dag, mock_executor, mock_render_dag):
+    def test_dag_test_show_dag(self, mock_get_dag, mock_render_dag):
         cli_args = self.parser.parse_args(
             ['dags', 'test', 'example_bash_operator', DEFAULT_DATE.isoformat(), '--show-dagrun']
         )
@@ -601,16 +687,8 @@ class TestCliDags(unittest.TestCase):
         mock_get_dag.assert_has_calls(
             [
                 mock.call(subdir=cli_args.subdir, dag_id='example_bash_operator'),
-                mock.call().clear(
-                    start_date=cli_args.execution_date,
-                    end_date=cli_args.execution_date,
-                    dag_run_state=False,
-                ),
-                mock.call().run(
-                    executor=mock_executor.return_value,
-                    start_date=cli_args.execution_date,
-                    end_date=cli_args.execution_date,
-                    run_at_least_once=True,
+                mock.call().test(
+                    execution_date=timezone.parse(DEFAULT_DATE.isoformat()), run_conf=None, session=mock.ANY
                 ),
             ]
         )

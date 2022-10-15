@@ -24,6 +24,39 @@
 Changelog
 ---------
 
+4.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add DataFlow operations to Azure DataFactory hook (#26345)``
+* ``Add network_profile param in AzureContainerInstancesOperator (#26117)``
+* ``Add Azure synapse operator (#26038)``
+* ``Auto tail file logs in Web UI (#26169)``
+* ``Implement Azure Service Bus Topic Create, Delete Operators (#25436)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix AzureBatchOperator false negative task status (#25844)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Apply PEP-563 (Postponed Evaluation of Annotations) to non-core airflow (#26289)``
+
+4.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add 'test_connection' method to AzureContainerInstanceHook (#25362)``
+* ``Add test_connection to Azure Batch hook (#25235)``
+* ``Bump typing-extensions and mypy for ParamSpec (#25088)``
+* ``Implement Azure Service Bus (Update and Receive) Subscription Operator (#25029)``
+* ``Set default wasb Azure http logging level to warning; fixes #16224 (#18896)``
+
 4.1.0
 .....
 

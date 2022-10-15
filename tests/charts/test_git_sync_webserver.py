@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+from __future__ import annotations
 
 import unittest
 
@@ -66,7 +67,7 @@ class GitSyncWebserverTest(unittest.TestCase):
             show_only=["templates/webserver/webserver-deployment.yaml"],
         )
 
-        assert "RELEASE-NAME-airflow-webserver" == jmespath.search(
+        assert "release-name-airflow-webserver" == jmespath.search(
             "spec.template.spec.serviceAccountName", docs[0]
         )
 

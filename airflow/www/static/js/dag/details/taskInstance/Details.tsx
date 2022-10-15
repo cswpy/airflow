@@ -20,12 +20,12 @@
 import React from 'react';
 import {
   Text,
-  Box,
   Flex,
   Table,
   Tbody,
   Tr,
   Td,
+  Divider,
 } from '@chakra-ui/react';
 
 import { finalStatesMap } from 'src/utils';
@@ -34,14 +34,16 @@ import { SimpleStatus } from 'src/dag/StatusBox';
 import Time from 'src/components/Time';
 import { ClipboardText } from 'src/components/Clipboard';
 import type { Task, TaskInstance, TaskState } from 'src/types';
-import DownstreamEvents from './DownstreamEvents';
+import useTaskInstance from 'src/api/useTaskInstance';
+import DatasetUpdateEvents from './DatasetUpdateEvents';
 
 interface Props {
   instance: TaskInstance;
   group: Task;
+  dagId: string;
 }
 
-const Details = ({ instance, group }: Props) => {
+const Details = ({ instance, group, dagId }: Props) => {
   const isGroup = !!group.children;
   const summary: React.ReactNode[] = [];
 
@@ -52,6 +54,7 @@ const Details = ({ instance, group }: Props) => {
     endDate,
     state,
     mappedStates,
+    mapIndex,
   } = instance;
 
   const {
@@ -60,6 +63,14 @@ const Details = ({ instance, group }: Props) => {
     operator,
     hasOutletDatasets,
   } = group;
+
+  const { data: apiTI } = useTaskInstance({
+    dagId,
+    dagRunId: runId,
+    taskId,
+    mapIndex,
+    enabled: !isGroup && !isMapped,
+  });
 
   const numMap = finalStatesMap();
   let numMapped = 0;
@@ -83,12 +94,17 @@ const Details = ({ instance, group }: Props) => {
     if (key > 0) {
       summary.push(
         // eslint-disable-next-line react/no-array-index-key
-        <Flex key={val} ml="10px" alignItems="center">
-          <SimpleStatus state={val as TaskState} mx={2} />
-          {val}
-          {': '}
-          {key}
-        </Flex>,
+        <Tr key={val}>
+          <Td />
+          <Td>
+            <Flex alignItems="center">
+              <SimpleStatus state={val as TaskState} mx={2} />
+              {val}
+              {': '}
+              {key}
+            </Flex>
+          </Td>
+        </Tr>,
       );
     }
   });
@@ -96,32 +112,44 @@ const Details = ({ instance, group }: Props) => {
   const taskIdTitle = isGroup ? 'Task Group ID' : 'Task ID';
   const isStateFinal = state && ['success', 'failed', 'upstream_failed', 'skipped'].includes(state);
   const isOverall = (isMapped || isGroup) && 'Overall ';
-
   return (
     <Flex flexWrap="wrap" justifyContent="space-between">
-      <Box>
-        {tooltip && (
-          <>
-            <Text>{tooltip}</Text>
-            <br />
-          </>
-        )}
-        {mappedStates && numMapped > 0 && (
-          <Text>
-            {numMapped}
-            {' '}
-            {numMapped === 1 ? 'Task ' : 'Tasks '}
-            Mapped
-          </Text>
-        )}
-        {summary.length > 0 && (
-          summary
-        )}
-      </Box>
-      <br />
-      <br />
+      {state === 'deferred' && (
+        <>
+          <Text as="strong">Triggerer info</Text>
+          <Divider my={2} />
+          <Table variant="striped" mb={3}>
+            <Tbody>
+              <Tr>
+                <Td>Trigger class</Td>
+                <Td>{`${apiTI?.trigger?.classpath}`}</Td>
+              </Tr>
+              <Tr>
+                <Td>Trigger creation time</Td>
+                <Td>{`${apiTI?.trigger?.createdDate}`}</Td>
+              </Tr>
+              <Tr>
+                <Td>Assigned triggerer</Td>
+                <Td>{`${apiTI?.triggererJob?.hostname}`}</Td>
+              </Tr>
+              <Tr>
+                <Td>Latest triggerer heartbeat</Td>
+                <Td>{`${apiTI?.triggererJob?.latestHeartbeat}`}</Td>
+              </Tr>
+            </Tbody>
+          </Table>
+        </>
+      )}
+
+      <Text as="strong">Task Instance Details</Text>
+      <Divider my={2} />
       <Table variant="striped">
         <Tbody>
+          {tooltip && (
+            <Tr>
+              <Td colSpan={2}>{tooltip}</Td>
+            </Tr>
+          )}
           <Tr>
             <Td>
               {isOverall}
@@ -134,14 +162,37 @@ const Details = ({ instance, group }: Props) => {
               </Flex>
             </Td>
           </Tr>
+          {mappedStates && numMapped > 0 && (
+            <Tr>
+              <Td colSpan={2}>
+                {numMapped}
+                {' '}
+                {numMapped === 1 ? 'Task ' : 'Tasks '}
+                Mapped
+              </Td>
+            </Tr>
+          )}
+          {summary.length > 0 && summary}
           <Tr>
             <Td>{taskIdTitle}</Td>
-            <Td><ClipboardText value={taskId} /></Td>
+            <Td>
+              <ClipboardText value={taskId} />
+            </Td>
           </Tr>
           <Tr>
             <Td>Run ID</Td>
-            <Td><Text whiteSpace="nowrap"><ClipboardText value={runId} /></Text></Td>
+            <Td>
+              <Text whiteSpace="nowrap">
+                <ClipboardText value={runId} />
+              </Text>
+            </Td>
           </Tr>
+          {mapIndex !== undefined && (
+            <Tr>
+              <Td>Map Index</Td>
+              <Td>{mapIndex}</Td>
+            </Tr>
+          )}
           {operator && (
             <Tr>
               <Td>Operator</Td>
@@ -158,19 +209,23 @@ const Details = ({ instance, group }: Props) => {
           {startDate && (
             <Tr>
               <Td>Started</Td>
-              <Td><Time dateTime={startDate} /></Td>
+              <Td>
+                <Time dateTime={startDate} />
+              </Td>
             </Tr>
           )}
           {endDate && isStateFinal && (
             <Tr>
               <Td>Ended</Td>
-              <Td><Time dateTime={endDate} /></Td>
+              <Td>
+                <Time dateTime={endDate} />
+              </Td>
             </Tr>
           )}
         </Tbody>
       </Table>
       {hasOutletDatasets && (
-        <DownstreamEvents taskId={taskId} runId={runId} />
+        <DatasetUpdateEvents taskId={taskId} runId={runId} />
       )}
     </Flex>
   );

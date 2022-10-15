@@ -14,10 +14,10 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+from __future__ import annotations
 
 import base64
 import unittest
-from typing import Union
 
 import jmespath
 from parameterized import parameterized
@@ -32,8 +32,7 @@ class ResultBackendConnectionSecretTest(unittest.TestCase):
         return values
 
     def _assert_for_old_version(self, version, value, expected_value):
-        # TODO remove default from condition after airflow update
-        if version == "2.3.2" or version == "default":
+        if version == "2.3.2":
             assert value == expected_value
         else:
             assert value is None
@@ -81,7 +80,7 @@ class ResultBackendConnectionSecretTest(unittest.TestCase):
 
         assert expected_doc_count == len(docs)
 
-    def _get_connection(self, values: dict) -> Union[str, None]:
+    def _get_connection(self, values: dict) -> str | None:
         docs = render_chart(
             values=values,
             show_only=["templates/secrets/result-backend-connection-secret.yaml"],
@@ -97,7 +96,7 @@ class ResultBackendConnectionSecretTest(unittest.TestCase):
         self._assert_for_old_version(
             version,
             value=connection,
-            expected_value="db+postgresql://postgres:postgres@RELEASE-NAME"
+            expected_value="db+postgresql://postgres:postgres@release-name"
             "-postgresql:5432/postgres?sslmode=disable",
         )
 
@@ -113,8 +112,8 @@ class ResultBackendConnectionSecretTest(unittest.TestCase):
         self._assert_for_old_version(
             version,
             value=connection,
-            expected_value="db+postgresql://someuser:somepass@RELEASE-NAME-pgbouncer"
-            ":6543/RELEASE-NAME-result-backend?sslmode=allow",
+            expected_value="db+postgresql://someuser:somepass@release-name-pgbouncer"
+            ":6543/release-name-result-backend?sslmode=allow",
         )
 
     @parameterized.expand(["2.3.2", "2.4.0", "default"])
@@ -126,8 +125,8 @@ class ResultBackendConnectionSecretTest(unittest.TestCase):
         self._assert_for_old_version(
             version,
             value=connection,
-            expected_value="db+postgresql://postgres:postgres@RELEASE-NAME-pgbouncer"
-            ":6543/RELEASE-NAME-result-backend?sslmode=disable",
+            expected_value="db+postgresql://postgres:postgres@release-name-pgbouncer"
+            ":6543/release-name-result-backend?sslmode=disable",
         )
 
     def test_should_set_pgbouncer_overrides_with_non_chart_database_when_enabled(self):
@@ -139,8 +138,8 @@ class ResultBackendConnectionSecretTest(unittest.TestCase):
 
         # host, port, dbname still get overridden even with an non-chart db
         assert (
-            "db+postgresql://someuser:somepass@RELEASE-NAME-pgbouncer:6543"
-            "/RELEASE-NAME-result-backend?sslmode=allow" == connection
+            "db+postgresql://someuser:somepass@release-name-pgbouncer:6543"
+            "/release-name-result-backend?sslmode=allow" == connection
         )
 
     @parameterized.expand(["2.3.2", "2.4.0", "default"])

@@ -14,6 +14,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+from __future__ import annotations
 
 import textwrap
 import unittest
@@ -25,7 +26,7 @@ from parameterized import parameterized
 
 from tests.charts.helm_template_generator import prepare_k8s_lookup_dict, render_chart
 
-RELEASE_NAME = "TEST-EXTRA-CONFIGMAPS-SECRETS"
+RELEASE_NAME = "test-extra-configmaps-secrets"
 
 
 class ExtraConfigMapsSecretsTest(unittest.TestCase):

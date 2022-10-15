@@ -21,7 +21,7 @@
 
 import { getMetaValue } from './utils';
 import { approxTimeFromNow, formatDateTime } from './datetime_utils';
-import openDatasetModal from './openDatasetModal';
+import { openDatasetModal, getDatasetTooltipInfo } from './datasetUtils';
 
 function updateQueryStringParameter(uri, key, value) {
   const re = new RegExp(`([?&])${key}=.*?(&|$)`, 'i');
@@ -33,18 +33,13 @@ function updateQueryStringParameter(uri, key, value) {
   return `${uri}${separator}${key}=${value}`;
 }
 
-// Pills highlighting
-$(window).on('load', function onLoad() {
-  $(`a[href*="${this.location.pathname}"]`).parent().addClass('active');
-  $('.never_active').removeClass('active');
-});
-
 const dagId = getMetaValue('dag_id');
 export const dagTZ = getMetaValue('dag_timezone');
 const logsWithMetadataUrl = getMetaValue('logs_with_metadata_url');
 const externalLogUrl = getMetaValue('external_log_url');
 const extraLinksUrl = getMetaValue('extra_links_url');
 const pausedUrl = getMetaValue('paused_url');
+const datasetsUrl = getMetaValue('datasets_url');
 const nextRun = {
   createAfter: getMetaValue('next_dagrun_create_after'),
   intervalStart: getMetaValue('next_dagrun_data_interval_start'),
@@ -58,6 +53,24 @@ let mapIndex;
 let mapStates = [];
 let extraLinks;
 const showExternalLogRedirect = getMetaValue('show_external_log_redirect') === 'True';
+let nextDatasets = [];
+let nextDatasetsError;
+
+const setNextDatasets = (datasets, error) => {
+  nextDatasets = datasets;
+  nextDatasetsError = error;
+};
+
+// Pills highlighting
+$(window).on('load', function onLoad() {
+  $(`a[href*="${this.location.pathname}"]`).parent().addClass('active');
+  $('.never_active').removeClass('active');
+  const run = $('#next-dataset-tooltip');
+  const singleDatasetUri = $(run).data('uri');
+  if (!singleDatasetUri) {
+    getDatasetTooltipInfo(dagId, run, setNextDatasets);
+  }
+});
 
 const buttons = Array.from(document.querySelectorAll('a[id^="btn_"][data-base-url]')).reduce((obj, elm) => {
   obj[elm.id.replace('btn_', '')] = elm;
@@ -402,6 +415,12 @@ $('#next-run').on('mouseover', () => {
 });
 
 $('.next-dataset-triggered').on('click', (e) => {
+  const run = $('#next-dataset-tooltip');
   const summary = $(e.target).data('summary');
-  openDatasetModal(dagId, summary || '');
+  const singleDatasetUri = $(run).data('uri');
+  if (!singleDatasetUri) {
+    openDatasetModal(dagId, summary, nextDatasets, nextDatasetsError);
+  } else {
+    window.location.href = `${datasetsUrl}?uri=${encodeURIComponent(singleDatasetUri)}`;
+  }
 });

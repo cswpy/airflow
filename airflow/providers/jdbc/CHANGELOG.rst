@@ -24,6 +24,27 @@
 Changelog
 ---------
 
+3.2.1
+.....
+
+Misc
+~~~~
+
+* ``Add common-sql lower bound for common-sql (#25789)``
+
+.. Review and move the new changes to one of the sections above:
+   * ``Apply PEP-563 (Postponed Evaluation of Annotations) to non-core airflow (#26289)``
+
+3.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Adding configurable fetch_all_handler for JdbcOperator (#25412)``
+* ``Unify DbApiHook.run() method with the methods which override it (#23971)``
+
+
 3.1.0
 .....
 

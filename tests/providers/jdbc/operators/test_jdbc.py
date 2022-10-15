@@ -15,6 +15,7 @@
 # KIND, either express or implied.  See the License for the
 # specific language governing permissions and limitations
 # under the License.
+from __future__ import annotations
 
 import unittest
 from unittest.mock import patch
@@ -28,8 +29,8 @@ class TestJdbcOperator(unittest.TestCase):
         self.kwargs = dict(sql='sql', task_id='test_jdbc_operator', dag=None)
 
     @patch('airflow.providers.jdbc.operators.jdbc.JdbcHook')
-    def test_execute(self, mock_jdbc_hook):
-        jdbc_operator = JdbcOperator(**self.kwargs)
+    def test_execute_do_push(self, mock_jdbc_hook):
+        jdbc_operator = JdbcOperator(**self.kwargs, do_xcom_push=True)
         jdbc_operator.execute(context={})
 
         mock_jdbc_hook.assert_called_once_with(jdbc_conn_id=jdbc_operator.jdbc_conn_id)
@@ -38,4 +39,16 @@ class TestJdbcOperator(unittest.TestCase):
             jdbc_operator.autocommit,
             parameters=jdbc_operator.parameters,
             handler=fetch_all_handler,
+        )
+
+    @patch('airflow.providers.jdbc.operators.jdbc.JdbcHook')
+    def test_execute_dont_push(self, mock_jdbc_hook):
+        jdbc_operator = JdbcOperator(**self.kwargs, do_xcom_push=False)
+        jdbc_operator.execute(context={})
+
+        mock_jdbc_hook.assert_called_once_with(jdbc_conn_id=jdbc_operator.jdbc_conn_id)
+        mock_jdbc_hook.return_value.run.assert_called_once_with(
+            jdbc_operator.sql,
+            jdbc_operator.autocommit,
+            parameters=jdbc_operator.parameters,
         )

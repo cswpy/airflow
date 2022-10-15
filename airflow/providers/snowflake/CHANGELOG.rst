@@ -24,6 +24,34 @@
 Changelog
 ---------
 
+3.3.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Add custom handler param in SnowflakeOperator (#25983)``
+
+Bug Fixes
+~~~~~~~~~
+
+* ``Fix wrong deprecation warning for 'S3ToSnowflakeOperator' (#26047)``
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
+   * ``Apply PEP-563 (Postponed Evaluation of Annotations) to non-core airflow (#26289)``
+   * ``copy into snowflake from external stage (#25541)``
+
+3.2.0
+.....
+
+Features
+~~~~~~~~
+
+* ``Move all "old" SQL operators to common.sql providers (#25350)``
+* ``Unify DbApiHook.run() method with the methods which override it (#23971)``
+
+
 3.1.0
 .....
 

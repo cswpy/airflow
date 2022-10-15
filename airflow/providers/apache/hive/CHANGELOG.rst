@@ -24,6 +24,20 @@
 Changelog
 ---------
 
+4.0.1
+.....
+
+Misc
+~~~~
+
+* ``Add common-sql lower bound for common-sql (#25789)``
+
+.. Review and move the new changes to one of the sections above:
+   * ``Apply PEP-563 (Postponed Evaluation of Annotations) to non-core airflow (#26289)``
+
+4.0.0
+.....
+
 Breaking Changes
 ~~~~~~~~~~~~~~~~
 
@@ -34,6 +48,16 @@ Breaking Changes
   signature from the DbApiHook. You need to rename it if you used it.
 * ``schema`` parameter in ``get_records`` is an optional kwargs extra parameter that you can add, to match
   the schema of ``get_records`` from DbApiHook.
+
+* ``Deprecate hql parameters and synchronize DBApiHook method APIs (#25299)``
+* ``Remove Smart Sensors (#25507)``
+
+Bug Fixes
+~~~~~~~~~
+
+
+.. Below changes are excluded from the changelog. Move them to
+   appropriate section above if needed. Do not delete the lines(!):
 
 3.1.0
 .....
